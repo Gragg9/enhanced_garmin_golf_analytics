@@ -129,6 +129,36 @@ def parse_export(json_path: str) -> list[ParsedRound]:
         for detail in data["scorecardDetails"]
     ]
 
+def round_to_dict(r: ParsedRound) -> dict:
+    return {
+        "round_id": r.round_id,
+        "course_id": r.course_id,
+        "course": r.course,
+        "city": r.city,
+        "state": r.state,
+        "start_time": r.start_time,
+        "end_time": r.end_time,
+        "tee_box": r.tee_box,
+        "score_type": r.score_type,
+        "tee_rating": r.tee_rating,
+        "tee_slope": r.tee_slope,
+        "holes_completed": r.holes_completed,
+    }
+
+
+def holes_to_dicts(r: ParsedRound) -> list[dict]:
+    return [
+        {
+            "round_id": r.round_id,
+            "hole": h.hole,
+            "strokes": h.strokes,
+            "putts": h.putts,
+            "penalties": h.penalties,
+            "fairway_outcome": h.fairway_outcome,
+        }
+        for h in r.holes
+    ]
+
 def main():
 
     data_dir = Path(
@@ -146,20 +176,9 @@ def main():
 
     for json_file in json_files:
 
-        print(f"\nParsing {json_file.name}...")
-
         rounds = parse_export(json_file)
 
         all_rounds.extend(rounds)
 
-    print(f"\nParsed {len(all_rounds)} rounds.\n")
-
-    for round_data in all_rounds:
-
-        print(f"Round ID : {round_data.round_id}")
-        print(f"Course   : {round_data.course}")
-        print(f"Date     : {round_data.start_time.date()}")
-        print(f"Holes    : {len(round_data.holes)}")
-        print()
 
 main()
