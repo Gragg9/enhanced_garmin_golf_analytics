@@ -1,18 +1,33 @@
 from playwright.sync_api import sync_playwright
 import json
 import time
-import re
 import os
 import sys
 
-SCORECARD_LIST_URL = "https://connect.garmin.com/app/scorecards/900d8263-6f06-4eb3-888a-e366dee03167"
 OUTPUT_DIR = r"C:\Users\gragg\Projects\GolfAnalytics\Data"
 USER_DATA_DIR = r"C:\Users\gragg\garmin-automation\User Data"
 PROFILE_DIR = "Profile 5"
 DELAY_SECONDS = 2
-MAX_SCORECARDS = 500  # safety cap
+MAX_SCORECARDS_PER_RUN = 500  # safety cap
+
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "checkpoint.json")
+OLDEST_KNOWN_SCORECARD_ID = "357643232"  # confirmed true oldest round
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def load_checkpoint():
+    """Returns the last successfully saved scorecard ID, or the oldest known ID if no checkpoint exists yet."""
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("last_scorecard_id", OLDEST_KNOWN_SCORECARD_ID)
+    return OLDEST_KNOWN_SCORECARD_ID
+
+
+def save_checkpoint(scorecard_id):
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"last_scorecard_id": scorecard_id}, f, indent=2)
 
 
 def refresh_login():
@@ -34,56 +49,8 @@ def refresh_login():
     print("--- Login refreshed. ---\n")
 
 
-def get_latest_scorecard_id(context):
-    """
-    Navigates to the scorecard list page and tries to find the newest scorecard ID.
-    Strategy 1: intercept any JSON API response that looks like a scorecard list.
-    Strategy 2 (fallback): scrape /app/scorecard/<id> links out of the rendered HTML.
-    """
-    page = context.new_page()
-    intercepted_ids = []
-
-    def handle_response(response):
-        if response.request.resource_type in ("xhr", "fetch") and response.status == 200:
-            ct = response.headers.get("content-type", "")
-            if "json" in ct.lower():
-                try:
-                    body = response.json()
-                except Exception:
-                    return
-                # Dump the URL so we can see what came back if IDs aren't found
-                found = re.findall(r'"scorecardId"\s*:\s*(\d+)', json.dumps(body))
-                if found:
-                    print(f"  [intercepted] {response.url} -> found IDs: {found[:5]}...")
-                    intercepted_ids.extend(int(i) for i in found)
-
-    page.on("response", handle_response)
-
-    print(f"Navigating to scorecard list: {SCORECARD_LIST_URL}")
-    page.goto(SCORECARD_LIST_URL, timeout=30000)
-    page.wait_for_timeout(4000)  # let list + API calls settle
-
-    if intercepted_ids:
-        newest = max(intercepted_ids)
-        print(f"Newest scorecard ID from intercepted API data: {newest}")
-        page.close()
-        return str(newest)
-
-    # Fallback: scrape rendered HTML for scorecard links
-    html = page.content()
-    ids = re.findall(r'/app/scorecard/(\d+)', html)
-    page.close()
-
-    if ids:
-        unique_ids = sorted(set(int(i) for i in ids), reverse=True)
-        print(f"Newest scorecard ID from HTML scrape: {unique_ids[0]} (found {len(unique_ids)} total links)")
-        return str(unique_ids[0])
-
-    print("Could not find any scorecard ID on the list page. Manual check needed.")
-    return None
-
-
 def fetch_scorecard(context, scorecard_id):
+    """Navigates to a scorecard page and intercepts the detail API response."""
     page = context.new_page()
     result = {"status": -1, "data": None}
 
@@ -115,6 +82,9 @@ def main():
     collected = 0
     refreshed_this_round = False
 
+    current_id = load_checkpoint()
+    print(f"Starting from scorecard ID: {current_id}")
+
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
@@ -126,13 +96,7 @@ def main():
             ],
         )
 
-        current_id = get_latest_scorecard_id(context)
-        if not current_id:
-            print("Stopping — no starting scorecard ID found.")
-            context.close()
-            sys.exit(1)
-
-        while current_id and collected < MAX_SCORECARDS:
+        while current_id and collected < MAX_SCORECARDS_PER_RUN:
             status, data = fetch_scorecard(context, current_id)
 
             if status == 200 and data is not None:
@@ -144,18 +108,22 @@ def main():
                 collected += 1
                 print(f"[{collected}] Saved scorecard {current_id}")
 
+                # Save checkpoint immediately after each success, so a
+                # mid-run crash doesn't lose progress or re-fetch old rounds.
+                save_checkpoint(current_id)
+
                 try:
                     details = data.get("scorecardDetails", [{}])[0]
                     next_prev = details.get("nextPreviousScorecardIdsApiModel", {})
-                    prev_id = next_prev.get("previousScorecardId")
+                    next_id = next_prev.get("nextScorecardId")
                 except Exception:
-                    prev_id = None
+                    next_id = None
 
-                if not prev_id:
-                    print("No previous scorecard ID found. Reached the oldest round.")
+                if not next_id:
+                    print("No newer scorecard found. Caught up to most recent round.")
                     break
 
-                current_id = str(prev_id)
+                current_id = str(next_id)
                 time.sleep(DELAY_SECONDS)
 
             else:
@@ -182,7 +150,7 @@ def main():
 
         context.close()
 
-    print(f"\nDone. Collected {collected} scorecards.")
+    print(f"\nDone. Collected {collected} new scorecard(s) this run.")
 
 
 if __name__ == "__main__":
